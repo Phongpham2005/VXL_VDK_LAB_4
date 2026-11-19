@@ -59,6 +59,7 @@ static void MX_IWDG_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 uint32_t get_time(void);
+void UART_Flush(void);
 void Task_Heartbeat_LED(void);
 void Task_Print_Time_10ms(void);
 void Task_One_Shot_Demo(void);
@@ -71,14 +72,38 @@ void Task_2_5s(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-// Trả về thời gian hệ thống tính bằng ms (độ chính xác 10ms theo yêu cầu lab)
+// Trả về thời gian hệ thống thực tế tính bằng ms
 uint32_t get_time(void) {
     return system_tick_count;
 }
 
-// Chuyển hướng hàm printf ra USART1 để hiển thị lên Virtual Terminal
+// Bộ đệm vòng (Ring Buffer) truyền UART phi chặn (Non-blocking)
+#define UART_TX_BUF_SIZE 512
+static uint8_t uart_tx_buf[UART_TX_BUF_SIZE];
+static volatile uint16_t uart_tx_head = 0;
+static volatile uint16_t uart_tx_tail = 0;
+
+void UART_Flush(void) {
+    while (uart_tx_tail != uart_tx_head) {
+        if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TXE)) {
+            huart1.Instance->DR = uart_tx_buf[uart_tx_tail];
+            uart_tx_tail = (uart_tx_tail + 1) % UART_TX_BUF_SIZE;
+        } else {
+            break;
+        }
+    }
+}
+
+// Chuyển hướng hàm printf ghi vào Ring Buffer phi chặn
 int __io_putchar(int ch) {
-    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    uint16_t next = (uart_tx_head + 1) % UART_TX_BUF_SIZE;
+    while (next == uart_tx_tail) {
+        // Buffer đầy, flush bớt ký tự ra UART
+        UART_Flush();
+    }
+    uart_tx_buf[uart_tx_head] = (uint8_t)ch;
+    uart_tx_head = next;
+    UART_Flush();
     return ch;
 }
 
@@ -114,8 +139,8 @@ void Task_2_5s(void) { printf("Task 2.5s executed at timestamp: %lu ms\r\n", get
 // Ngắt định kỳ TIM2 (10ms/lần)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     if (htim->Instance == TIM2) {
-        SCH_Update();
         system_tick_count += 10;
+        SCH_Update();
 
         // Refresh (đá) Watchdog định kỳ trong ngắt Timer để tránh hệ thống bị reset
         HAL_IWDG_Refresh(&hiwdg);
@@ -158,20 +183,20 @@ int main(void)
   // Khởi tạo bộ lập lịch
     SCH_Init();
 
-    // Khởi động Timer 2 ở chế độ ngắt (tick = 10ms)
-    HAL_TIM_Base_Start_IT(&htim2);
     SCH_Add_Task(Task_Heartbeat_LED, 0, 1000);
-    // Đăng ký Task One-shot (ví dụ sau 3 giây = 300 ticks) TRƯỚC khi vào vòng lặp chính
+    // Đăng ký Task One-shot (sau 3 giây = 3000ms) để kiểm chứng thực thi đồng thời
     SCH_Add_Task(Task_One_Shot_Demo, 3000, 0);
-    // Đăng ký Task gọi callback mỗi 10ms để in get_time (có thể bật khi cần demo chi tiết)
-    // SCH_Add_Task(Task_Print_Time_10ms, 0, 10);
+
 
     // Đăng ký 5 Task định kỳ theo yêu cầu Lab 4: 0.5s, 1.0s, 1.5s, 2.0s, 2.5s
     SCH_Add_Task(Task_0_5s, 0, 500);
-    SCH_Add_Task(Task_1_0s, 0, 1000);
-    SCH_Add_Task(Task_1_5s, 0, 1500);
-    SCH_Add_Task(Task_2_0s, 0, 2000);
-    SCH_Add_Task(Task_2_5s, 0, 2500);
+    SCH_Add_Task(Task_1_0s, 10, 1000);
+    SCH_Add_Task(Task_1_5s, 20, 1500);
+    SCH_Add_Task(Task_2_0s, 30, 2000);
+    SCH_Add_Task(Task_2_5s, 40, 2500);
+
+    // Khởi động Timer 2 sau khi đã nạp xong toàn bộ task ban đầu (tránh lệch tick khởi động)
+    HAL_TIM_Base_Start_IT(&htim2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -180,6 +205,9 @@ int main(void)
   {
 	 // Thực thi các tác vụ sẵn sàng trong hàng đợi
 	 SCH_Dispatch_Tasks();
+
+	 // Đẩy dữ liệu từ Ring Buffer ra UART phi chặn
+	 UART_Flush();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
